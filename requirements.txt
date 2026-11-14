@@ -1,0 +1,14 @@
+langchain>=1.4,<2
+langchain-anthropic>=1.7,<2
+langchain-chroma>=1.1,<2
+langchain-huggingface[full]>=1.2,<2
+langchain-mcp-adapters>=0.3,<0.4
+langchain-text-splitters>=1.1,<2
+langgraph>=1.2,<2
+mcp>=1.30,<2
+python-dotenv>=1.0,<2
+pytest>=8,<10
+
+# Local open-weight models
+langchain-ollama>=1.1,<2
+langchain-openai>=1.7,<2
