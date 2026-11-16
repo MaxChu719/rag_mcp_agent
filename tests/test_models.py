@@ -1,7 +1,7 @@
 from dataclasses import replace
 
 import pytest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessageChunk, ToolMessage
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
@@ -58,6 +58,34 @@ def test_ollama_receives_context_window_and_reasoning(settings):
 def test_model_id_without_provider_is_rejected(model_id):
     with pytest.raises(ValueError):
         split_model_id(model_id)
+
+
+@pytest.fixture
+def lmstudio_model(settings):
+    return build_chat_model(replace(settings, chat_model="lmstudio:qwen/qwen3-8b"))
+
+
+def test_lmstudio_keeps_reasoning_from_full_response(lmstudio_model):
+    response = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "51", "reasoning_content": "17*3"},
+                "finish_reason": "stop",
+            }
+        ]
+    }
+
+    message = lmstudio_model._create_chat_result(response).generations[0].message
+
+    assert message.additional_kwargs["reasoning_content"] == "17*3"
+
+
+def test_lmstudio_keeps_reasoning_from_streamed_chunks(lmstudio_model):
+    chunk = {"choices": [{"index": 0, "delta": {"reasoning_content": "17*3"}}]}
+
+    generation = lmstudio_model._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, {})
+
+    assert generation.message.additional_kwargs["reasoning_content"] == "17*3"
 
 
 def test_list_tool_content_becomes_plain_text():

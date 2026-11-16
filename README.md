@@ -66,6 +66,31 @@ The first is a plain lookup. The second makes the agent retrieve the policy, rea
 
 While it runs, the CLI prints each tool call (`->`) and a preview of each tool result (`<-`), so you can watch the agent's decisions.
 
+Add `--debug` to see what happens inside each model call:
+
+```bash
+python agent.py --debug "How long does express shipping take for a 7 kg parcel?"
+```
+
+```
+  [thinking] The user asks about express shipping, so I should search the policy...
+  [model] tokens in=754 out=63 reasoning=27 finish_reason=tool_calls
+  -> search_knowledge_base({'query': 'express shipping weight limits'})
+  [mcp] knowledge_base.search_knowledge_base request: {"query": "express shipping weight limits"}
+  [mcp] knowledge_base.search_knowledge_base response after 0.02 s (ok: text, 548 chars, structured content)
+  <- search_knowledge_base [success]: [shipping.md#0] (relevance 0.64) ...full text...
+  [thinking] Express takes 1-2 days; 7 kg falls in the up-to-20 kg tier...
+
+Assistant: Express shipping takes 1-2 business days [shipping.md#0]...
+  [model] tokens in=963 out=128 reasoning=73 finish_reason=stop
+```
+
+Debug mode streams everything the model generates as it is generated: its reasoning (`[thinking]`) and its text (`Assistant:`), including text written alongside a tool call, which normal mode hides. After every model call it prints token usage and the finish reason (`[model]`). Every MCP round trip is traced (`[mcp]`): the request is printed before it is sent, then the response with its duration and the shape of the result. Tool results are printed in full, and errors include tracebacks. Together these show where a slow run spends its time. If the reasoning stops growing, the model server is stuck. If a `[mcp] ... request` line has no matching response, the MCP server is stuck. A `finish_reason` of `length` means the model ran out of output tokens or context.
+
+Reasoning appears for models that expose it: thinking models on LM Studio or other OpenAI-compatible servers (their `reasoning_content` field), Ollama with `CHAT_REASONING=true`, and Claude with extended thinking enabled.
+
+Two problems are reported in every mode, because otherwise a run would just end with no answer. `!! malformed tool call` means the model produced a tool call whose arguments could not be parsed. `!! The model returned neither an answer nor a tool call` usually means a thinking model wrote its tool call inside its reasoning rather than as a real tool call. Run with `--debug` to see it.
+
 ## How a request flows
 
 When the agent starts, `MultiServerMCPClient` launches each stdio server as a subprocess (or connects over HTTP), and `load_mcp_tools` converts each MCP tool into a LangChain `BaseTool`, using the tool's docstring as its description and its type hints as its argument schema. Those descriptions are what the model reads when deciding which tool to call, so they are written as instructions to the model.
@@ -77,6 +102,8 @@ For each question, `create_agent` runs a loop: the model either answers or emits
 **One live session per server.** `client.get_tools()` is the shortest way to load MCP tools, but tools loaded that way open a new session for every call, which for stdio servers means spawning a fresh process (and reloading the embedding model) on every search. `agent.py` instead opens one session per server with `client.session(...)` inside an `AsyncExitStack` and loads tools from those sessions, so each server starts once and is shut down cleanly on exit.
 
 **stdout belongs to the protocol.** A stdio MCP server speaks JSON-RPC over stdout, so any stray `print` corrupts the stream. Never print from server code; use `logging`, which FastMCP sends to stderr. The servers set FastMCP's log level to `WARNING` to keep the agent's console readable.
+
+**Heavy libraries load before the server starts serving.** `rag_mcp_server.py` loads the embedding model and runs one search before `mcp.run()`, rather than on the first tool call. On Windows, loading the embedding stack imports native libraries for the first time (sentence-transformers pulls in scikit-learn and SciPy, whose BLAS DLL initialises a Fortran runtime). Over the stdio transport, a background thread is meanwhile blocked reading stdin. A blocking read on a Windows pipe also blocks other operations on that handle, so the DLL's start-up code waits forever and the first tool call never returns. Loading everything before stdin is read avoids the deadlock. It also makes the server fail at start-up with a clear message when the index is missing, and keeps the first question as fast as the rest. The cost is that the agent takes a few seconds longer to start. Any new stdio server that imports native libraries lazily needs the same treatment.
 
 **Retrieval says when it found nothing.** Results below `MIN_RELEVANCE` (cosine similarity, 0 to 1) are dropped, and if nothing remains the tool returns an explicit "no relevant passages" message. Returning weakly related chunks invites the model to stitch an answer together from them. The threshold depends on the embedding model, so tune it against your own documents.
 
@@ -142,7 +169,7 @@ CHAT_MODEL=lmstudio:qwen/qwen3-8b
 CHAT_TEMPERATURE=0
 ```
 
-This goes through LM Studio's OpenAI-compatible endpoint (default `http://localhost:1234/v1`) using `ChatOpenAI` from `langchain-openai`, pinned to the Chat Completions API. LM Studio fixes the context length when a model is loaded, not per request, so set it in the model's load settings or with `lms load <model> --context-length 16384`; `CHAT_CONTEXT_WINDOW` is ignored here. If you enabled authentication on the LM Studio server, put the token in `CHAT_API_KEY`.
+This goes through LM Studio's OpenAI-compatible endpoint (default `http://localhost:1234/v1`) using `ChatOpenAICompatible` from `models.py`, pinned to the Chat Completions API. That class is a small subclass of `ChatOpenAI` from `langchain-openai`. `ChatOpenAI` follows the official OpenAI API only, so it throws away the `reasoning_content` field that LM Studio (and vLLM and others) use for a thinking model's reasoning. The subclass keeps that field in `additional_kwargs["reasoning_content"]`, which is where `--debug` reads it. LM Studio fixes the context length when a model is loaded, not per request, so set it in the model's load settings or with `lms load <model> --context-length 16384`; `CHAT_CONTEXT_WINDOW` is ignored here. If you enabled authentication on the LM Studio server, put the token in `CHAT_API_KEY`.
 
 Prefer models with native tool-use support (the hammer badge in LM Studio). With LM Studio's fallback tool-use mode, smaller models can produce malformed tool calls; LM Studio then returns them as plain text, and the agent prints that text as if it were the answer.
 

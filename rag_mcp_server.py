@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import sys
 from functools import cache
 
 from langchain_chroma import Chroma
@@ -32,6 +33,12 @@ def get_vector_store() -> Chroma:
         raise RuntimeError("Knowledge base is empty. Run `python ingest.py` first.")
     logger.info("Loading vector store from %s", settings.chroma_dir)
     return open_vector_store(settings)
+
+
+def warm_up_retrieval() -> None:
+    """Load the embedding model and index before serving, so no tool call imports native
+    libraries (on Windows that deadlocks the stdio transport; see README)."""
+    get_vector_store().similarity_search("warm-up", k=1)
 
 
 def format_passage(document: Document, relevance: float) -> str:
@@ -69,18 +76,25 @@ def list_knowledge_sources() -> str:
     return "\n".join(sources) if sources else "The knowledge base is empty."
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--http", action="store_true", help="serve over streamable HTTP")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
+
+    try:
+        warm_up_retrieval()
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        return 1
 
     if args.http:
         mcp.settings.port = args.port
         mcp.run(transport="streamable-http")
     else:
         mcp.run(transport="stdio")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
